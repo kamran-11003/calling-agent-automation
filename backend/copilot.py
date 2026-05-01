@@ -86,22 +86,46 @@ Response:
 }"""
 
 
+def _get_llm_client_and_model(openai_api_key: str = "") -> tuple["AsyncOpenAI", str] | None:
+    """
+    Returns (AsyncOpenAI client, model name) using the best available key.
+    Priority: platform OpenAI key > caller-provided key > platform Gemini key.
+    Returns None if no key is available.
+    """
+    from config import get_settings
+    settings = get_settings()
+
+    # 1. OpenAI (platform or caller-provided)
+    oai_key = settings.openai_api_key or openai_api_key
+    if oai_key:
+        return AsyncOpenAI(api_key=oai_key), "gpt-4o"
+
+    # 2. Gemini via OpenAI-compatible endpoint
+    gemini_key = settings.gemini_api_key
+    if gemini_key:
+        client = AsyncOpenAI(
+            api_key=gemini_key,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        )
+        return client, "gemini-3.1-flash-lite-preview"
+
+    return None
+
+
 async def run_copilot(
     user_message: str,
     current_config: dict[str, Any],
     conversation_history: list[dict],
-    openai_api_key: str = "",  # kept for backward compat but platform key takes priority
+    openai_api_key: str = "",  # kept for backward compat
 ) -> dict[str, Any]:
     """
-    Runs the copilot LLM call using the platform OpenAI key.
+    Runs the copilot LLM call. Uses OpenAI if available, otherwise falls back to Gemini.
     """
-    from config import get_settings
-    settings = get_settings()
-    api_key = settings.openai_api_key or openai_api_key
-    if not api_key:
-        return {"message": "The platform OpenAI key is not configured yet. Please set OPENAI_API_KEY in the backend .env file.", "patch": {}}
+    llm = _get_llm_client_and_model(openai_api_key)
+    if not llm:
+        return {"message": "No AI key is configured. Please set OPENAI_API_KEY or GEMINI_API_KEY in the backend .env file.", "patch": {}}
 
-    client = AsyncOpenAI(api_key=api_key)
+    client, model = llm
 
     # Search app-level KB for relevant context
     system = COPILOT_SYSTEM_PROMPT
@@ -124,7 +148,7 @@ async def run_copilot(
     ]
 
     response = await client.chat.completions.create(
-        model="gpt-4o",
+        model=model,
         messages=messages,
         response_format={"type": "json_object"},
         max_tokens=1500,
@@ -155,11 +179,10 @@ async def simulate_conversation(
     Generate a mock conversation to let user preview agent behavior.
     Returns list of {role: "agent"|"user", text: str}
     """
-    from config import get_settings
-    api_key = get_settings().openai_api_key or openai_api_key
-    if not api_key:
+    llm = _get_llm_client_and_model(openai_api_key)
+    if not llm:
         return []
-    client = AsyncOpenAI(api_key=api_key)
+    client, model = llm
 
     prompt = f"""Simulate a realistic phone call conversation using the agent config below.
 Scenario: {scenario}
@@ -170,7 +193,7 @@ Agent config:
 {json.dumps(config, indent=2)}"""
 
     response = await client.chat.completions.create(
-        model="gpt-4o",
+        model=model,
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
         max_tokens=1000,
